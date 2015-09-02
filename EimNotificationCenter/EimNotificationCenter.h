@@ -8,6 +8,8 @@
 
 #import "EimNotificationCenterDefine.h"
 
+double EimMachTimeToSecond(uint64_t time);
+
 #pragma mark -
 #pragma mark EimNotification
 @interface EimNotification : NSObject
@@ -41,6 +43,13 @@
 
 //
 //add
+- (void)addObserver:(id)notificationObserver selector:(SEL)notificationSelector
+               name:(NSString *)notificationName
+             object:(id)notificationSender;
+- (id<NSObject>)addObserverForName:(NSString *)notificationName
+                            object:(id)notificationSender
+                        usingBlock:(void (^)(EimNotification *note))block;
+
 - (void)addObserver:(id)notificationObserver selector:(SEL)notificationSelector
                name:(NSString *)notificationName
              object:(id)notificationSender

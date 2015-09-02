@@ -55,4 +55,7 @@ typedef enum EimDeviceTypeEnum: NSUInteger {
               waitUntilDone:(BOOL)wait;
 
 + (void)dispatchOnMainThread:(dispatch_block_t)aBlock;
+
+//thread
++ (__uint64_t)currentThreadID;
 @end

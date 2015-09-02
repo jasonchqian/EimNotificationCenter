@@ -12,9 +12,9 @@
 
 #define EIMUINT_BIT  (CHAR_BIT * sizeof(NSUInteger))
 #define EIMUINTROTATE(val, howmuch) \
-        ((((NSUInteger)val) << howmuch) | (((NSUInteger)val) >> (EIMUINT_BIT - howmuch)))
+((((NSUInteger)val) << howmuch) | (((NSUInteger)val) >> (EIMUINT_BIT - howmuch)))
 
-#define EIMNOTIFICATIONCENTER_TIMECONSUMING_INVOKE_TRACE    1 // invoke time-consuming trace
+#define EIMNOTIFICATIONCENTER_TIMECONSUMING_INVOKE_TRACE    0 // invoke time-consuming trace
 #define EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE           0 // handle postNotification time-consuming trace
 
 static BOOL IsEqualObject(id aObj, id bObj)
@@ -84,8 +84,8 @@ double EimMachTimeToSecond(uint64_t time)
     
     EimNotification *aNotification = object;
     return IsEqualObject(self.name, aNotification.name) &&
-            (self.object == aNotification.object) &&
-            (self.userInfo == aNotification.userInfo);
+    (self.object == aNotification.object) &&
+    (self.userInfo == aNotification.userInfo);
 }
 
 - (NSString *)description
@@ -195,6 +195,8 @@ double EimMachTimeToSecond(uint64_t time)
 @property (nonatomic, assign)   BOOL        exeOnMainThread;
 
 - (BOOL)executeWithNotification:(EimNotification *)aEimNotification
+                    willExecute:(void (^)())willExecuteBlock
+                     didExecute:(void (^)())didExecuteBlock
                  otherArguments:(id)arg,...;
 
 @end
@@ -275,12 +277,12 @@ double EimMachTimeToSecond(uint64_t time)
         return;
     }
     
-@synchronized(self) {
-    _selectorString = [selectorString retain];
-    if (_invocation) {
-        _RELEASE(_invocation);
+    @synchronized(self) {
+        _selectorString = [selectorString retain];
+        if (_invocation) {
+            _RELEASE(_invocation);
+        }
     }
-}
 }
 
 - (void)setObserver:(id)observer
@@ -289,12 +291,12 @@ double EimMachTimeToSecond(uint64_t time)
         return;
     }
     
-@synchronized(self) {
-    _observer = observer;
-    if (_invocation) {
-        _RELEASE(_invocation);
+    @synchronized(self) {
+        _observer = observer;
+        if (_invocation) {
+            _RELEASE(_invocation);
+        }
     }
-}
 }
 
 #pragma mark ▇▇ Utility
@@ -343,6 +345,8 @@ double EimMachTimeToSecond(uint64_t time)
 }
 
 - (BOOL)executeWithNotification:(EimNotification *)aEimNotification
+                    willExecute:(void (^)())willExecuteBlock
+                     didExecute:(void (^)())didExecuteBlock
                  otherArguments:(id)arg,...
 {
     id              eachObject   = nil;
@@ -371,13 +375,19 @@ double EimMachTimeToSecond(uint64_t time)
     {
         __block EimNotificationObj *weakSelf = self;
         [EimNotificationCenterUtil dispatchOnMainThread:^{
+            willExecuteBlock();
             [weakSelf executeWithNotification:aEimNotification arguList:arrArguList];
+            didExecuteBlock();
         }];
         
         return YES;
     }
     
-    return [self executeWithNotification:aEimNotification arguList:arrArguList];
+    willExecuteBlock();
+    BOOL bExeResult = [self executeWithNotification:aEimNotification arguList:arrArguList];
+    didExecuteBlock();
+    
+    return bExeResult;
 }
 
 - (BOOL)executeWithNotification:(EimNotification *)aEimNotification
@@ -388,78 +398,84 @@ double EimMachTimeToSecond(uint64_t time)
     uint64_t invocationEnsure   = exeTimeStart;
 #endif
     
-@synchronized(self) {
-    eimMethod;
-    //param check
-    if (!self.observer || !self.selectorString ) {
-        eimLog(@"param error");
-        return NO;
-    }
-    
-    if (!_invocation) {
-        NSInvocation *invocation = [[self class] invocationWithTarget:self.observer
-                                                       selectorString:self.selectorString];
-        if (!invocation) {
+    @synchronized(self) {
+        eimMethod;
+        //param check
+        if (!self.observer || !self.selectorString ) {
+            eimLog(@"param error");
             return NO;
         }
         
-        _invocation = [invocation retain];
+        if (![self.observer respondsToSelector:NSSelectorFromString(self.selectorString)]) {
+            eimLog(@"unrecognized selector[%@] sent to instance[%@]",
+                   self.selectorString, NSStringFromClass([self.observer class]));
+            return NO;
+        }
+        
+        if (!_invocation) {
+            NSInvocation *invocation = [[self class] invocationWithTarget:self.observer
+                                                           selectorString:self.selectorString];
+            if (!invocation) {
+                return NO;
+            }
+            
+            _invocation = [invocation retain];
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_INVOKE_TRACE
-        invocationEnsure = mach_absolute_time();
+            invocationEnsure = mach_absolute_time();
 #endif
+        }
+        
+        //insert parameters
+        static NSUInteger nCustomizableParamIndex = 2;
+        for (NSUInteger nLoop = nCustomizableParamIndex;
+             nLoop < _invocation.methodSignature.numberOfArguments; nLoop++)
+        {
+            if (nLoop == nCustomizableParamIndex) {
+                [_invocation setArgument:(__bridge void *)(&aEimNotification)
+                                 atIndex:nLoop];
+                continue;
+            }
+            
+            id aArgument = NULL;
+            if (argList && (nLoop > nCustomizableParamIndex) &&
+                (nLoop - nCustomizableParamIndex - 1) < argList.count) {
+                aArgument = argList[(nLoop - nCustomizableParamIndex - 1)];
+            }
+            
+            if (aArgument != nil) {
+                [_invocation setArgument:&aArgument atIndex:nLoop];
+                continue;
+            }
+            
+            id emptyArgu = [NSNull null];
+            [_invocation setArgument:&emptyArgu atIndex:nLoop];
+        }
+        
+#if EIMNOTIFICATIONCENTER_TIMECONSUMING_INVOKE_TRACE
+        uint64_t arguEnd = mach_absolute_time();
+#endif
+        
+        //as each time we insert new arguments,
+        //so its not necessary to cache any arguments earlier.
+        //    [_invocation retainArguments];
+        
+        //
+        //Invoke
+        [_invocation invoke];
+        
+#if EIMNOTIFICATIONCENTER_TIMECONSUMING_INVOKE_TRACE
+        uint64_t timeInvoke = mach_absolute_time() - arguEnd;
+        uint64_t time = mach_absolute_time() - exeTimeStart;
+        
+        NSLog(@"\n[Time: %g s]\n[invocEnsure:%.2f%%], [argu:%.2f%%], [invoke:%.2f%%]\n",
+              EimMachTimeToSecond(time),
+              (float)((invocationEnsure - exeTimeStart)*100)/(float)time,
+              (float)(arguEnd - invocationEnsure)*100/(float)time,
+              (float)timeInvoke*100/(float)time);
+#endif
+        
+        return YES;
     }
-    
-    //insert parameters
-    static NSUInteger nCustomizableParamIndex = 2;
-    for (NSUInteger nLoop = nCustomizableParamIndex;
-         nLoop < _invocation.methodSignature.numberOfArguments; nLoop++)
-    {
-        if (nLoop == nCustomizableParamIndex) {
-            [_invocation setArgument:(__bridge void *)(&aEimNotification)
-                             atIndex:nLoop];
-            continue;
-        }
-        
-        id aArgument = NULL;
-        if (argList && (nLoop > nCustomizableParamIndex) &&
-            (nLoop - nCustomizableParamIndex - 1) < argList.count) {
-            aArgument = argList[(nLoop - nCustomizableParamIndex - 1)];
-        }
-        
-        if (aArgument != nil) {
-            [_invocation setArgument:&aArgument atIndex:nLoop];
-            continue;
-        }
-        
-        id emptyArgu = [NSNull null];
-        [_invocation setArgument:&emptyArgu atIndex:nLoop];
-    }
-    
-#if EIMNOTIFICATIONCENTER_TIMECONSUMING_INVOKE_TRACE
-    uint64_t arguEnd = mach_absolute_time();
-#endif
-  
-//as each time we insert new arguments,
-//so its not necessary to cache any arguments earlier.
-//    [_invocation retainArguments];
-    
-//
-//Invoke
-    [_invocation invoke];
-    
-#if EIMNOTIFICATIONCENTER_TIMECONSUMING_INVOKE_TRACE
-    uint64_t timeInvoke = mach_absolute_time() - arguEnd;
-    uint64_t time = mach_absolute_time() - exeTimeStart;
-    
-    NSLog(@"\n[Time: %g s]\n[invocEnsure:%.2f%%], [argu:%.2f%%], [invoke:%.2f%%]\n",
-          EimMachTimeToSecond(time),
-          (float)((invocationEnsure - exeTimeStart)*100)/(float)time,
-          (float)(arguEnd - invocationEnsure)*100/(float)time,
-          (float)timeInvoke*100/(float)time);
-#endif
-    
-    return YES;
-}
 }
 
 @end
@@ -525,17 +541,24 @@ executeOnMainThread:(BOOL)execOnMainThread
 }
 
 - (void)executeWithNotification:(EimNotification *)aEimNotification
+                    willExecute:(void (^)())willExecuteBlock
+                     didExecute:(void (^)())didExecuteBlock
+
 {
     if (self.exeOnMainThread && ![NSThread isMainThread]) {
         __block EimNotificationBlock *weakSelf = self;
         [EimNotificationCenterUtil dispatchOnMainThread:^{
-            [weakSelf executeWithNotification:aEimNotification];
+            [weakSelf executeWithNotification:aEimNotification
+                                  willExecute:willExecuteBlock
+                                   didExecute:didExecuteBlock];
         }];
         
         return;
     }
     
+    willExecuteBlock();
     self.block(aEimNotification);
+    didExecuteBlock();
 }
 
 #pragma mark ▇▇ Interface
@@ -552,6 +575,29 @@ executeOnMainThread:(BOOL)execOnMainThread
 @end
 
 #pragma mark -
+#pragma mark EimNotificationRemoveObj
+@interface EimNotificationRemoveObj : NSObject {
+}
+
+@property (nonatomic, assign)   id          observer;
+@property (nonatomic, copy)     NSString    *name;
+@property (nonatomic, assign)   id          sender;
+@end
+
+@implementation EimNotificationRemoveObj
+
+- (void)dealloc
+{
+    _observer = nil;
+    _sender   = nil;
+    _RELEASE(_name);
+    
+    [super dealloc];
+}
+
+@end
+
+#pragma mark -
 #pragma mark EimNotificationCenter
 typedef enum EimNotificationObjSearch: NSUInteger {
     kEimNotificationObjSearchForLoop,
@@ -560,9 +606,12 @@ typedef enum EimNotificationObjSearch: NSUInteger {
 }EimNotificationObjSearchEnum;
 
 @interface EimNotificationCenter() {
-// obj: nsarray with EimNotificationObj element,
-// key: EimNotificationKey obj
+    // obj: nsarray with EimNotificationObj element,
+    // key: EimNotificationKey obj
     NSMutableDictionary *_mainMap;
+    
+    // posting threads
+    NSMutableSet        *_callbackThreads;
 }
 
 @end
@@ -574,8 +623,8 @@ static EimNotificationCenter *g_instance = nil;
 + (EimNotificationCenter *)defaultCenter
 {
     eimMethod;
-//maybe anyone alloc the object with "alloc" method
-//instead of invoking "defaultCenter"
+    //maybe anyone alloc the object with "alloc" method
+    //instead of invoking "defaultCenter"
     if (g_instance) {
         return g_instance;
     }
@@ -626,8 +675,13 @@ static EimNotificationCenter *g_instance = nil;
 
 - (void)reset {
     eimMethod;
-    _RELEASE(_mainMap);
     _RELEASE(_asynNotificationQueue);
+    _RELEASE(_callbackThreads);
+    
+    _callbackThreads         = [[NSMutableSet alloc] initWithCapacity:0];
+    
+    //for asynNotification
+    _asynNotificationQueue  = [[NSMutableArray alloc] initWithCapacity:0];
 }
 
 #pragma mark ▇▇ LifeCycle
@@ -637,9 +691,7 @@ static EimNotificationCenter *g_instance = nil;
     self = [super init];
     if (self) {
         _mainMap                = [[NSMutableDictionary alloc] initWithCapacity:0];
-        
-        //for asynNotification
-        _asynNotificationQueue  = [[NSMutableArray alloc] initWithCapacity:0];
+        [self reset];
     }
     
     return self;
@@ -661,6 +713,17 @@ static EimNotificationCenter *g_instance = nil;
 - (void)addObserver:(id)notificationObserver selector:(SEL)notificationSelector
                name:(NSString *)notificationName
              object:(id)notificationSender
+{
+    return [self addObserver:notificationObserver
+                    selector:notificationSelector
+                        name:notificationName
+                      object:notificationSender
+           forceOnMainthread:NO];
+}
+
+- (void)addObserver:(id)notificationObserver selector:(SEL)notificationSelector
+               name:(NSString *)notificationName
+             object:(id)notificationSender
   forceOnMainthread:(BOOL)bOnMainThread
 {
     eimMethod;
@@ -674,29 +737,39 @@ static EimNotificationCenter *g_instance = nil;
     NSMutableArray      *arrObj     = nil;
     EimNotificationObj  *aElement   = nil;
     
-@synchronized(self) {
-    //check obj for the key
-    id aObj = [_mainMap objectForKey:aKey];
-    if (!aObj || ![aObj isKindOfClass:[NSMutableArray class]]) {
-        arrObj = [NSMutableArray arrayWithCapacity:0];
-        [_mainMap setObject:arrObj forKey:aKey];
-    }
-    else {
-        arrObj = (NSMutableArray *)aObj;
-    }
-    
-    //element for array
-    NSString *selectorName = nil;
-    if (notificationSelector != NULL) {
-        selectorName = NSStringFromSelector(notificationSelector);
-    }
-    aElement = [EimNotificationObj objForObserver:notificationObserver
-                                         selector:selectorName
-                              executeOnMainThread:bOnMainThread];
-    if (aElement) {
-        [arrObj addObject:aElement];
+    @synchronized(self) {
+        //check obj for the key
+        id aObj = [_mainMap objectForKey:aKey];
+        if (!aObj || ![aObj isKindOfClass:[NSMutableArray class]]) {
+            arrObj = [NSMutableArray arrayWithCapacity:0];
+            [_mainMap setObject:arrObj forKey:aKey];
+        }
+        else {
+            arrObj = (NSMutableArray *)aObj;
+        }
+        
+        //element for array
+        NSString *selectorName = nil;
+        if (notificationSelector != NULL) {
+            selectorName = NSStringFromSelector(notificationSelector);
+        }
+        aElement = [EimNotificationObj objForObserver:notificationObserver
+                                             selector:selectorName
+                                  executeOnMainThread:bOnMainThread];
+        if (aElement) {
+            [arrObj addObject:aElement];
+        }
     }
 }
+
+- (id<NSObject>)addObserverForName:(NSString *)notificationName
+                            object:(id)notificationSender
+                        usingBlock:(void (^)(EimNotification *note))block
+{
+    return [self addObserverForName:notificationName
+                             object:notificationSender
+                         usingBlock:block
+                  forceOnMainthread:NO];
 }
 
 - (id<NSObject>)addObserverForName:(NSString *)notificationName
@@ -715,25 +788,25 @@ static EimNotificationCenter *g_instance = nil;
     NSMutableArray          *arrObj     = nil;
     EimNotificationBlock    *aElement   = nil;
     
-@synchronized(self) {
-    //check obj for the key
-    id aObj = [_mainMap objectForKey:aKey];
-    if (!aObj || ![aObj isKindOfClass:[NSMutableArray class]]) {
-        arrObj = [NSMutableArray arrayWithCapacity:0];
-        [_mainMap setObject:arrObj forKey:aKey];
+    @synchronized(self) {
+        //check obj for the key
+        id aObj = [_mainMap objectForKey:aKey];
+        if (!aObj || ![aObj isKindOfClass:[NSMutableArray class]]) {
+            arrObj = [NSMutableArray arrayWithCapacity:0];
+            [_mainMap setObject:arrObj forKey:aKey];
+        }
+        else {
+            arrObj = (NSMutableArray *)aObj;
+        }
+        
+        //element for array
+        aElement = [EimNotificationBlock blockObjForBlock:block
+                                                   forKey:aKey
+                                      executeOnMainThread:bOnMainThread];
+        if (aElement) {
+            [arrObj addObject:aElement];
+        }
     }
-    else {
-        arrObj = (NSMutableArray *)aObj;
-    }
-    
-    //element for array
-    aElement = [EimNotificationBlock blockObjForBlock:block
-                                               forKey:aKey
-                                  executeOnMainThread:bOnMainThread];
-    if (aElement) {
-        [arrObj addObject:aElement];
-    }
-}
     
     return aElement;
 }
@@ -746,13 +819,9 @@ static EimNotificationCenter *g_instance = nil;
         return;
     }
     
-    //remove for block
-    if ([notificationObserver isKindOfClass:[EimNotificationBlock class]]) {
-        return [self removeBlockObserver:((EimNotificationBlock *)notificationObserver)];
-    }
-    
-    //remove for obj
-    [self removeObjObserver:notificationObserver];
+    [self removeObserver:notificationObserver
+                    name:nil
+                  object:nil];
 }
 
 - (void)removeObserver:(id)notificationObserver
@@ -760,12 +829,34 @@ static EimNotificationCenter *g_instance = nil;
                 object:(id)notificationSender
 {
     eimMethod;
-    if (!notificationObserver) {
+    
+    EimNotificationRemoveObj *aRemoveObj = [[[EimNotificationRemoveObj alloc] init] autorelease];
+    aRemoveObj.observer = notificationObserver;
+    aRemoveObj.name     = notificationName;
+    aRemoveObj.sender   = notificationSender;
+    
+    if ([self isThreadInPostingQueue:[EimNotificationCenterUtil currentThreadID]]) {
+        [self performSelector:@selector(removeObserverAsyn:)
+                   withObject:aRemoveObj afterDelay:0.0f];
+        return;
+    };
+    
+    [self removeObserverAsyn:aRemoveObj];
+}
+
+- (void)removeObserverAsyn:(EimNotificationRemoveObj *)aRemoveObj
+{
+    eimMethod;
+    if (!aRemoveObj) {
         return;
     }
     
+    id notificationObserver     = aRemoveObj.observer;
+    id notificationSender       = aRemoveObj.sender;
+    NSString *notificationName  = aRemoveObj.name;
+    
     //remove for block
-    if ([notificationObserver isKindOfClass:[EimNotificationBlock class]]) {
+    if (notificationObserver && [notificationObserver isKindOfClass:[EimNotificationBlock class]]) {
         return [self removeBlockObserver:((EimNotificationBlock *)notificationObserver)];
     }
     
@@ -804,25 +895,18 @@ static EimNotificationCenter *g_instance = nil;
         return;
     }
     
-    //key
-    EimNotificationKey *aKey = [EimNotificationKey keyForSender:notificationSender
-                                                           name:notificationName];
-    if (!aKey) {
-        return;
-    }
-#if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
-    uint64_t keyTimeEnd = mach_absolute_time();
-#endif
-    
-    //obj get
-    id aObj = [_mainMap objectForKey:aKey];
+    //key and fetch value
+    id aObj = [self valueForNotificationName:notificationName object:notificationSender];
     if (!aObj || ![aObj isKindOfClass:[NSMutableArray class]] || ((NSArray *)aObj).count <= 0) {
         return;
     }
+    
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
     uint64_t objTimeEnd = mach_absolute_time();
 #endif
     
+    __block __uint64_t              threadID    = 0;
+    __block EimNotificationCenter   *weakSelf   = self;
     __block EimNotification *aNotification = [EimNotification notificationWithName:notificationName
                                                                             object:notificationSender
                                                                           userInfo:userInfo];
@@ -838,41 +922,68 @@ static EimNotificationCenter *g_instance = nil;
         case kEimNotificationObjSearchEnumerationLoop:
         {
             [((NSMutableArray *)aObj) enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop)
-            {
-                if (!obj) {
-                    return;
-                }
-                
+             {
+                 if (!obj) {
+                     return;
+                 }
+                 
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
-                findObjEnd = mach_absolute_time();
-                if (findObjSpare == 0) {
-                    findObjSpare += (findObjEnd - objEIMNotificationEnd);
-                }
-                else {
-                    findObjSpare += (findObjEnd - findObjStart);
-                }
+                 findObjEnd = mach_absolute_time();
+                 if (findObjSpare == 0) {
+                     findObjSpare += (findObjEnd - objEIMNotificationEnd);
+                 }
+                 else {
+                     findObjSpare += (findObjEnd - findObjStart);
+                 }
 #endif
                  
-                if ([obj isKindOfClass:[EimNotificationBlock class]])
-                {
-                    //
-                    // block
-                    [((EimNotificationBlock *)obj) executeWithNotification:aNotification];
+                 if ([obj isKindOfClass:[EimNotificationBlock class]])
+                 {
+                     //
+                     // block
+                     [((EimNotificationBlock *)obj) executeWithNotification:aNotification
+                                                                willExecute:
+                      ^{
+                          //add current thread to posting queue
+                          //avoid remove observer while posting it
+                          threadID = [EimNotificationCenterUtil currentThreadID];
+                          [weakSelf addToCallbackThreadQueue:threadID];
+                      }
+                                                                 didExecute:
+                      ^{
+                          //remove current thread to posting queue
+                          //means post end.
+                          [weakSelf removeFromCallbackThreadQueue:threadID];
+                      }];
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
-                    blockSpare += (mach_absolute_time() - findObjEnd);
+                     blockSpare += (mach_absolute_time() - findObjEnd);
 #endif
-                }
-                else if ([obj isKindOfClass:[EimNotificationObj class]]) { // _cmd
-                    [((EimNotificationObj *)obj) executeWithNotification:aNotification otherArguments:nil];
+                 }
+                 else if ([obj isKindOfClass:[EimNotificationObj class]]) { // _cmd
+                     [((EimNotificationObj *)obj) executeWithNotification:aNotification
+                                                              willExecute:
+                      ^{
+                          //add current thread to posting queue
+                          //avoid remove observer while posting it
+                          threadID = [EimNotificationCenterUtil currentThreadID];
+                          [self addToCallbackThreadQueue:threadID];
+                      }
+                                                               didExecute:
+                      ^{
+                          //remove current thread to posting queue
+                          //means post end.
+                          [self removeFromCallbackThreadQueue:threadID];
+                      }
+                                                           otherArguments:nil];
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
-                    invokeSpare += (mach_absolute_time() - findObjEnd);
+                     invokeSpare += (mach_absolute_time() - findObjEnd);
 #endif
-                }
-                
+                 }
+                 
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
-                findObjStart = mach_absolute_time();
+                 findObjStart = mach_absolute_time();
 #endif
-            }];
+             }];
             
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
             findObjEnd = mach_absolute_time();
@@ -895,13 +1006,42 @@ static EimNotificationCenter *g_instance = nil;
                 }
 #endif
                 if ([obj isKindOfClass:[EimNotificationBlock class]]) { // block
-                    ((EimNotificationBlock *)obj).block(aNotification);
+                    //
+                    // block
+                    [((EimNotificationBlock *)obj) executeWithNotification:aNotification
+                                                               willExecute:
+                     ^{
+                         //add current thread to posting queue
+                         //avoid remove observer while posting it
+                         threadID = [EimNotificationCenterUtil currentThreadID];
+                         [weakSelf addToCallbackThreadQueue:threadID];
+                     }
+                                                                didExecute:
+                     ^{
+                         //remove current thread to posting queue
+                         //means post end.
+                         [weakSelf removeFromCallbackThreadQueue:threadID];
+                     }];
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
                     blockSpare += (mach_absolute_time() - findObjEnd);
 #endif
                 }
                 else if ([obj isKindOfClass:[EimNotificationObj class]]) { // _cmd
-                    [((EimNotificationObj *)obj) executeWithNotification:aNotification otherArguments:nil];
+                    [((EimNotificationObj *)obj) executeWithNotification:aNotification
+                                                             willExecute:
+                     ^{
+                         //add current thread to posting queue
+                         //avoid remove observer while posting it
+                         threadID = [EimNotificationCenterUtil currentThreadID];
+                         [self addToCallbackThreadQueue:threadID];
+                     }
+                                                              didExecute:
+                     ^{
+                         //remove current thread to posting queue
+                         //means post end.
+                         [self removeFromCallbackThreadQueue:threadID];
+                     }
+                                                          otherArguments:nil];
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
                     invokeSpare += (mach_absolute_time() - findObjEnd);
 #endif
@@ -925,10 +1065,9 @@ static EimNotificationCenter *g_instance = nil;
     
 #if EIMNOTIFICATIONCENTER_TIMECONSUMING_TRACE
     uint64_t time = mach_absolute_time() - postTimeStart;
-    NSLog(@"\n[Time: %g s]\n[key:%.2f%%], [obj:%.2f%%], [notiobj:%.2f%%]\n[findobj:%.2f%%]\n[invoke:%.2f%%], [block:%.2f%%]\n",
+    NSLog(@"\n[Time: %g s]\n[obj:%.2f%%], [notiobj:%.2f%%]\n[findobj:%.2f%%]\n[invoke:%.2f%%], [block:%.2f%%]\n",
           EimMachTimeToSecond(time),
-          (float)((keyTimeEnd - postTimeStart)*100)/(float)time,
-          (float)(objTimeEnd - keyTimeEnd)*100/(float)time,
+          (float)(objTimeEnd - postTimeStart)*100/(float)time,
           (float)(objEIMNotificationEnd - objTimeEnd)*100/(float)time,
           (float)findObjSpare*100/(float)time,
           (float)invokeSpare*100/(float)time, (float)blockSpare*100/(float)time);
@@ -943,23 +1082,23 @@ static EimNotificationCenter *g_instance = nil;
         return;
     }
     
-@synchronized(self){
     id<NSCopying> forkey = aNotificationBlock.notificationKey;
     if (!forkey) {
         return;
     }
     
-    id aObj = [_mainMap objectForKey:forkey];
-    if (aObj && [aObj isKindOfClass:[NSMutableArray class]])
-    {
-        [((NSMutableArray *)aObj) removeObject:aNotificationBlock];
-        
-        //if empty, then clear
-        if (((NSMutableArray *)aObj).count == 0) {
-            [_mainMap removeObjectForKey:forkey];
+    @synchronized(self){
+        id aObj = [_mainMap objectForKey:forkey];
+        if (aObj && [aObj isKindOfClass:[NSMutableArray class]])
+        {
+            [((NSMutableArray *)aObj) removeObject:aNotificationBlock];
+            
+            //if empty, then clear
+            if (((NSMutableArray *)aObj).count == 0) {
+                [_mainMap removeObjectForKey:forkey];
+            }
         }
     }
-}
 }
 
 - (void)removeObjObserver:(id)notificationObserver
@@ -969,33 +1108,46 @@ static EimNotificationCenter *g_instance = nil;
         return;
     }
     
-@synchronized(self){
-    [_mainMap enumerateKeysAndObjectsWithOptions:NSEnumerationConcurrent
-                                      usingBlock:^(id key, id value, BOOL *stop)
-     {
-         if (![value isKindOfClass:[NSMutableArray class]]) {
-             return;
-         }
-         
-         [((NSMutableArray *)value) enumerateObjectsWithOptions:NSEnumerationReverse
-                                                     usingBlock:^(id obj, NSUInteger idx, BOOL *stop)
-          {
-              if (![obj isKindOfClass:[EimNotificationObj class]]) {
-                  return;
-              }
-              
-              if (((EimNotificationObj *)obj).observer == notificationObserver) {
-                  [value removeObject:((EimNotificationObj *)obj)];
-              }
-          }];
-         
-         //if empty, then clear
-         if (((NSMutableArray *)value).count == 0) {
-             [_mainMap removeObjectForKey:key];
-             return;
-         }
-     }];
-}
+    @synchronized(self)
+    {
+        NSMutableArray *arrKeysToRemove = [NSMutableArray arrayWithCapacity:_mainMap.count];
+        [_mainMap enumerateKeysAndObjectsWithOptions:NSEnumerationConcurrent
+                                          usingBlock:^(id key, id value, BOOL *stop)
+         {
+             if (![value isKindOfClass:[NSMutableArray class]]) {
+                 return;
+             }
+             
+             //run loop for 'arrTemp', and handle the true array.
+             //to avoid the crash for "XXX was mutated while being enumerated"
+             //Reference: https://developer.apple.com/library/mac/documentation/Cocoa/Conceptual/Collections/Articles/Enumerators.html
+             NSArray *arrTemp = [NSArray arrayWithArray:((NSMutableArray *)value)];
+             for (id aObj in arrTemp)
+             {
+                 if (![aObj isKindOfClass:[EimNotificationObj class]]) {
+                     continue;
+                 }
+                 
+                 if (((EimNotificationObj *)aObj).observer == notificationObserver) {
+                     [((NSMutableArray *)value) removeObject:((EimNotificationObj *)aObj)];
+                 }
+             }
+             
+             //if empty, then need clear
+             //collect all keys to remove delay.
+             //to avoid the crash for "XXX was mutated while being enumerated"
+             //Reference: https://developer.apple.com/library/mac/documentation/Cocoa/Conceptual/Collections/Articles/Enumerators.html
+             if (((NSMutableArray *)value).count == 0) {
+                 [arrKeysToRemove addObject:key];
+                 return;
+             }
+         }];
+        
+        //remove
+        if (arrKeysToRemove.count > 0) {
+            [_mainMap removeObjectsForKeys:arrKeysToRemove];
+        }
+    }
 }
 
 - (void)removeObjObserver:(id)notificationObserver
@@ -1004,6 +1156,11 @@ static EimNotificationCenter *g_instance = nil;
 {
     eimMethod;
     if (!notificationObserver || !_mainMap) {
+        return;
+    }
+    
+    if (!notificationName && !notificationSender) {
+        [self removeObjObserver:notificationObserver];
         return;
     }
     
@@ -1020,37 +1177,147 @@ static EimNotificationCenter *g_instance = nil;
     }
     
     //remove for obj
-@synchronized(self){
-    [_mainMap enumerateKeysAndObjectsWithOptions:NSEnumerationConcurrent
-                                      usingBlock:^(id key, id value, BOOL *stop)
-     {
-         if (![key isKindOfClass:[EimNotificationKey class]]) {
-             return;
-         }
-         
-         if ([key hash] != keyHash) {
-             return;
-         }
-         
-         [((NSMutableArray *)value) enumerateObjectsWithOptions:NSEnumerationReverse
-                                                     usingBlock:^(id obj, NSUInteger idx, BOOL *stop)
-          {
-              if (![obj isKindOfClass:[EimNotificationObj class]]) {
-                  return;
-              }
-              
-              if (((EimNotificationObj *)obj).observer == notificationObserver) {
-                  [value removeObject:((EimNotificationObj *)obj)];
-              }
-          }];
-         
-         //if empty, then clear
-         if (((NSMutableArray *)value).count == 0) {
-             [_mainMap removeObjectForKey:key];
-             return;
-         }
-     }];
+    @synchronized(self){
+        NSMutableArray *arrKeysToRemove = [NSMutableArray arrayWithCapacity:_mainMap.count];
+        [_mainMap enumerateKeysAndObjectsWithOptions:NSEnumerationConcurrent
+                                          usingBlock:^(id key, id value, BOOL *stop)
+         {
+             if (![key isKindOfClass:[EimNotificationKey class]]) {
+                 return;
+             }
+             
+             if ([key hash] != keyHash) {
+                 return;
+             }
+             
+             //run loop for 'arrTemp', and handle the true array.
+             //to avoid the crash for "XXX was mutated while being enumerated"
+             //Reference: https://developer.apple.com/library/mac/documentation/Cocoa/Conceptual/Collections/Articles/Enumerators.html
+             NSArray *arrTemp = [NSArray arrayWithArray:((NSMutableArray *)value)];
+             for (id aObj in arrTemp)
+             {
+                 if (![aObj isKindOfClass:[EimNotificationObj class]]) {
+                     continue;
+                 }
+                 
+                 if (((EimNotificationObj *)aObj).observer == notificationObserver) {
+                     [((NSMutableArray *)value) removeObject:((EimNotificationObj *)aObj)];
+                 }
+             }
+             
+             //if empty, then need clear
+             //collect all keys to remove delay.
+             //to avoid the crash for "XXX was mutated while being enumerated"
+             //Reference: https://developer.apple.com/library/mac/documentation/Cocoa/Conceptual/Collections/Articles/Enumerators.html
+             if (((NSMutableArray *)value).count == 0) {
+                 [arrKeysToRemove addObject:key];
+                 return;
+             }
+         }];
+        
+        //remove
+        if (arrKeysToRemove.count > 0) {
+            [_mainMap removeObjectsForKeys:arrKeysToRemove];
+        }
+    }
 }
+
+- (id)valueForNotificationName:(NSString *)notificationName
+                        object:(id)notificationSender
+{
+    EimNotificationKey *fullKey     = nil;
+    EimNotificationKey *senderKey   = nil;
+    
+    if (!notificationName) {
+        return nil;
+    }
+    
+    senderKey = [EimNotificationKey keyForSender:notificationSender
+                                            name:notificationName];
+    //if "sender != nil", we need get a Key for "sender == nil" situation
+    if (notificationSender) {
+        fullKey = [EimNotificationKey keyForSender:nil
+                                              name:notificationName];
+    }
+    
+    //avoid param invalid
+    if (!senderKey && !fullKey) {
+        return nil;
+    }
+    
+    //avoid fullkey isequal to senderKey
+    if (senderKey && fullKey && [senderKey isEqual:fullKey]) {
+        fullKey = nil;
+    }
+    
+    //obj get
+    NSMutableArray  *arrValues  = [NSMutableArray arrayWithCapacity:0];
+    @synchronized(self)
+    {
+        id senderObj   = nil;
+        id fullObj     = nil;
+        
+        if (senderKey) {
+            senderObj = [_mainMap objectForKey:senderKey];
+        }
+        
+        if (fullKey) {
+            fullObj = [_mainMap objectForKey:fullKey];
+        }
+        
+        //union
+        if (senderObj && [senderObj isKindOfClass:[NSArray class]] && ((NSArray *)senderObj).count > 0) {
+            [arrValues addObjectsFromArray:((NSArray *)senderObj)];
+        }
+        if (fullObj && [fullObj isKindOfClass:[NSArray class]] && ((NSArray *)fullObj).count > 0) {
+            [arrValues addObjectsFromArray:((NSArray *)fullObj)];
+        }
+    }
+    
+    return arrValues;
 }
+
+- (BOOL)isThreadInPostingQueue:(__uint64_t)aThreadID
+{
+    if (aThreadID <= 0) {
+        return NO;
+    }
+    
+    @synchronized(self) {
+        if (!_callbackThreads) {
+            return YES; //if posting queue nil, we should think it's in posting status.
+        }
+        
+        NSString *strThreadID = [NSString stringWithFormat:@"%llu", aThreadID];
+        return [_callbackThreads containsObject:strThreadID];
+    }
+}
+
+- (void)addToCallbackThreadQueue:(__uint64_t)aThreadID
+{
+    @synchronized(self) {
+        if (!_callbackThreads) {
+            _callbackThreads = [[NSMutableSet alloc] initWithCapacity:0];
+        }
+        
+        NSString *strThreadID = [NSString stringWithFormat:@"%llu", aThreadID];
+        [_callbackThreads addObject:strThreadID];
+    }
+}
+
+- (void)removeFromCallbackThreadQueue:(__uint64_t)aThreadID
+{
+    @synchronized(self) {
+        if (!_callbackThreads || aThreadID <= 0) {
+            return;
+        }
+        
+        NSString *strThreadID = [NSString stringWithFormat:@"%llu", aThreadID];
+        if ([_callbackThreads containsObject:strThreadID]) {
+            [_callbackThreads removeObject:strThreadID];
+        }
+    }
+}
+
 
 @end

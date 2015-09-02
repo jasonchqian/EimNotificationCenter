@@ -8,6 +8,7 @@
 
 #import "EimNotificationCenterUtil.h"
 #include <sys/sysctl.h>
+#import <pthread.h>
 
 @interface EimNotificationBlockTask : NSObject
 @property (nonatomic, copy) dispatch_block_t block;
@@ -183,6 +184,20 @@ EimDeviceType g_deviceType = EimDeviceNone;
     [[self class] performOnMainThread:blockTask withSelector:@selector(execute)
                            withObject:nil waitUntilDone:NO];
 
+}
+
++ (__uint64_t)currentThreadID
+{
+    __uint64_t  threadID    = 0;
+    int         rval        = pthread_threadid_np(NULL, &threadID);
+    
+    if (threadID > 0) {
+        return threadID;
+    }
+    else {
+        eimLog(@"get threadID failed:[%llu], errorCode:[%d]", threadID, rval);
+        return 0;
+    }
 }
 
 @end
